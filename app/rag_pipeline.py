@@ -20,11 +20,16 @@ def load_documents(pdf_path):
     return documents
 
 # Split Documents (Étape 2)
-def split_documents(documents, chunk_size=1000, chunk_overlap=200):
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+def split_documents(documents):
     chunks = []
     for document in documents:
-        chunks.extend(text_splitter.split_text(document))
+        # Séparer le texte en questions-réponses
+        questions_reponses = document.split("\nQ : ")
+        
+        for qr in questions_reponses:
+            qr = qr.strip()
+            if qr:  # Éviter les entrées vides
+                chunks.append("Q : " + qr) 
     return chunks
 
 # Store Embeddings (Étape 3)
@@ -41,12 +46,23 @@ def store_embeddings(chunks):
 
 # Retrieve Relevant Documents (Étape 4)
 def retrieve_relevant_documents(query, faiss_index, chunks):
-    model = SentenceTransformer('all-MiniLM-L6-v2')  # Générer l'embedding de la requête
-    query_embedding = model.encode([query])
+    model = SentenceTransformer('all-MiniLM-L6-v2')  # Charger le modèle d'embedding
+    query_embedding = model.encode([query])  # Générer l'embedding de la requête
 
     # Recherche dans FAISS
-    results = faiss_index.search(query_embedding, k=5)  # k = 5, par exemple, récupérer les 5 meilleurs résultats
-    relevant_chunks = [chunks[i] for i in results[1].flatten()]  # Indices des résultats pertinents
+    results = faiss_index.search(query_embedding, k=1)  # k=1 pour récupérer le meilleur résultat
+
+    # Récupération des chunks pertinents
+    relevant_chunks = [chunks[i] for i in results[1].flatten()]  
+
+    # Sélection du chunk le plus pertinent
+    if relevant_chunks:
+        best_chunk = relevant_chunks[0]  # Prendre uniquement le premier
+    else:
+        best_chunk = "Je ne trouve pas de réponse pertinente."
+
+    print(f"Chunk sélectionné : {best_chunk}")
+    # print("Chunks récupérés :", relevant_chunks)  # À décommenter pour debug
 
     return relevant_chunks
 
