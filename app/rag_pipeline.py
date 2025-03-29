@@ -1,114 +1,102 @@
 from PyPDF2 import PdfReader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 import faiss
 import numpy as np
-from sentence_transformers import SentenceTransformer
-from langchain_community.vectorstores import FAISS
-from langchain.chains import RetrievalQA
-from transformers import BartForConditionalGeneration, BartTokenizer
-import atexit
 import torch
+from sentence_transformers import SentenceTransformer
+from transformers import BartForConditionalGeneration, BartTokenizer
+import re
+
 torch.set_num_threads(1)
 
-# Load Documents (Étape 1)
+# ---- 1. Extraction et nettoyage du texte du PDF ----
 def load_documents(pdf_path):
     reader = PdfReader(pdf_path)
     documents = []
     for page in reader.pages:
         text = page.extract_text()
-        documents.append(text)
+        if text:
+            text = re.sub(r'\s+', ' ', text).strip()  # Supprimer les espaces inutiles
+            documents.append(text)
     return documents
 
-# Split Documents (Étape 2)
+# ---- 2. Séparation des questions-réponses ----
 def split_documents(documents):
     chunks = []
     for document in documents:
-        # Séparer le texte en questions-réponses
-        questions_reponses = document.split("\nQ : ")
+        # Séparer avec un regex plus robuste
+        questions_reponses = re.split(r"\bQ\s*:\s*", document)
         
         for qr in questions_reponses:
             qr = qr.strip()
-            if qr:  # Éviter les entrées vides
-                chunks.append("Q : " + qr) 
+            if "R :" in qr:
+                qr = "Q : " + qr  # Reformater la question-réponse
+                chunks.append(qr)
     return chunks
 
-# Store Embeddings (Étape 3)
+# ---- 3. Stockage des embeddings avec FAISS ----
 def store_embeddings(chunks):
-    model = SentenceTransformer('all-MiniLM-L6-v2')  # Utilisation de Hugging Face
+    model = SentenceTransformer('all-MiniLM-L6-v2')
     embeddings = model.encode(chunks, convert_to_tensor=True)
 
-    # Conversion des embeddings en format numpy pour FAISS
+    # Stockage dans FAISS
     embeddings_np = embeddings.cpu().numpy()
-    faiss_index = faiss.IndexFlatL2(embeddings_np.shape[1])  # Index pour la recherche
-    faiss_index.add(embeddings_np)  # Ajout des embeddings dans l'index
+    faiss_index = faiss.IndexFlatL2(embeddings_np.shape[1])
+    faiss_index.add(embeddings_np)
 
     return faiss_index, embeddings_np
 
-# Retrieve Relevant Documents (Étape 4)
+# ---- 4. Recherche des documents pertinents ----
 def retrieve_relevant_documents(query, faiss_index, chunks):
-    model = SentenceTransformer('all-MiniLM-L6-v2')  # Charger le modèle d'embedding
-    query_embedding = model.encode([query])  # Générer l'embedding de la requête
+    model = SentenceTransformer('all-MiniLM-L6-v2')
+    query_embedding = model.encode([query])
 
-    # Recherche dans FAISS
-    results = faiss_index.search(query_embedding, k=1)  # k=1 pour récupérer le meilleur résultat
+    results = faiss_index.search(query_embedding, k=3)  # Récupérer les 3 meilleurs résultats
+    relevant_chunks = [chunks[i] for i in results[1].flatten()]
 
-    # Récupération des chunks pertinents
-    relevant_chunks = [chunks[i] for i in results[1].flatten()]  
-
-    # Sélection du chunk le plus pertinent
     if relevant_chunks:
-        best_chunk = relevant_chunks[0]  # Prendre uniquement le premier
+        print(f"Documents pertinents trouvés : {relevant_chunks}")
+        return relevant_chunks
     else:
-        best_chunk = "Je ne trouve pas de réponse pertinente."
+        return ["Désolé, je n'ai pas trouvé de réponse pertinente."]
 
-    #print(f"Chunk sélectionné : {best_chunk}")
-    # print("Chunks récupérés :", relevant_chunks)  # À décommenter pour debug
-
-    return best_chunk
-
-# Generate Response (Étape 5) - Remplacer OpenAI par BART de Hugging Face
+# ---- 5. Génération de la réponse avec BART ----
 def generate_response(relevant_chunks):
-    # Charger le modèle BART et le tokenizer
     model_name = "facebook/bart-large-cnn"
     model = BartForConditionalGeneration.from_pretrained(model_name)
     tokenizer = BartTokenizer.from_pretrained(model_name)
 
-    # Combiner les chunks pertinents pour le prompt
-    prompt = " ".join(relevant_chunks)
+    # Nettoyer les chunks avant de les envoyer à BART
+    context = " ".join(relevant_chunks)
+    context = re.sub(r'\s+', ' ', context).strip()
+
+    # Encodage
+    inputs = tokenizer(context, return_tensors="pt", truncation=True, padding=True, max_length=1024)
     
-    # Tokenisation du prompt
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, padding=True, max_length=1024)
-    
-    # Générer la réponse avec BART
+    # Génération
     summary_ids = model.generate(
         inputs['input_ids'], 
-        max_length=200, 
+        max_length=150, 
         num_beams=4, 
         no_repeat_ngram_size=2, 
-        do_sample=True,  # Active l'échantillonnage
-        temperature=0.7   # Influence la créativité
+        do_sample=True, 
+        temperature=0.7
     )
     
-    # Décoder la réponse générée
     response = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
-    
     return response
 
-# Exemple d'utilisation
-pdf_path = "data/FAQ_RH.pdf"
+# ---- 6. Exemple d'utilisation ----
+pdf_path = "FAQ_RH.pdf"
 documents = load_documents(pdf_path)
 chunks = split_documents(documents)
 faiss_index, embeddings = store_embeddings(chunks)
 
-# Ensure proper cleanup of FAISS resources
+query = "Puis-je reporter mes conges a l'annee suivante ?"
 
-atexit.register(faiss_index.reset)
-
-query = "Quel est le processus pour un entretien de recrutement ?"
 try:
     relevant_chunks = retrieve_relevant_documents(query, faiss_index, chunks)
     response = generate_response(relevant_chunks)
     print(response)
 finally:
-    # Explicitly clean up FAISS resources
-    del faiss_index
+    del faiss_index  # Libération de la mémoire
+
