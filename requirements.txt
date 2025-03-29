@@ -1,0 +1,14 @@
+langchain
+pypdf
+openai
+faiss-cpu
+chromadb
+streamlit
+langchain-community
+faiss-cpu
+tiktoken
+transformers 
+sentence-transformers 
+faiss-cpu
+PyPDF2
+sentence_transformers

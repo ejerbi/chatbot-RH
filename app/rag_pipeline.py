@@ -3,10 +3,12 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer
-from langchain.vectorstores import FAISS
+from langchain_community.vectorstores import FAISS
 from langchain.chains import RetrievalQA
-# from langchain.llms import OpenAI  # Removed as we are using Hugging Face pipeline
-from transformers import pipeline
+from transformers import BartForConditionalGeneration, BartTokenizer
+import atexit
+import torch
+torch.set_num_threads(1)
 
 # Load Documents (Étape 1)
 def load_documents(pdf_path):
@@ -30,9 +32,8 @@ def store_embeddings(chunks):
     model = SentenceTransformer('all-MiniLM-L6-v2')  # Utilisation de Hugging Face
     embeddings = model.encode(chunks, convert_to_tensor=True)
 
-    # Déplacer les embeddings sur le CPU avant de les convertir en numpy
+    # Conversion des embeddings en format numpy pour FAISS
     embeddings_np = embeddings.cpu().numpy()
-
     faiss_index = faiss.IndexFlatL2(embeddings_np.shape[1])  # Index pour la recherche
     faiss_index.add(embeddings_np)  # Ajout des embeddings dans l'index
 
@@ -49,24 +50,38 @@ def retrieve_relevant_documents(query, faiss_index, chunks):
 
     return relevant_chunks
 
-# Generate Response (Étape 5)
+# Generate Response (Étape 5) - Remplacer OpenAI par BART de Hugging Face
 def generate_response(relevant_chunks):
-    # Utilisation de Hugging Face pour la génération de texte
-    generator = pipeline("text-generation", model="gpt2")  # Vous pouvez choisir un autre modèle si nécessaire
-    context = " ".join(relevant_chunks)
-    prompt = f"Basé sur les informations suivantes, réponds à la question : {context}"
-    response = generator(prompt, max_length=200, num_return_sequences=1)[0]["generated_text"]
+    # Charger le modèle BART et le tokenizer
+    model_name = "facebook/bart-large-cnn"
+    model = BartForConditionalGeneration.from_pretrained(model_name)
+    tokenizer = BartTokenizer.from_pretrained(model_name)
+
+    # Combiner les chunks pertinents pour le prompt
+    prompt = " ".join(relevant_chunks)
+    
+    # Tokenisation du prompt
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, padding=True, max_length=1024)
+    
+    # Générer la réponse avec BART
+    summary_ids = model.generate(inputs['input_ids'], max_length=200, num_beams=4, no_repeat_ngram_size=2, temperature=0.7)
+    
+    # Décoder la réponse générée
+    response = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
     
     return response
 
 # Exemple d'utilisation
-pdf_path = "chatbot-RH/data/FAQ_RH.pdf"
+pdf_path = "data/FAQ_RH.pdf"
 documents = load_documents(pdf_path)
-query = "Quel est le processus pour un entretien de recrutement ?"
-# Create FAISS index and embeddings
 chunks = split_documents(documents)
-faiss_index, embeddings_np = store_embeddings(chunks)
+faiss_index, embeddings = store_embeddings(chunks)
 
+# Ensure proper cleanup of FAISS resources
+
+atexit.register(faiss_index.reset)
+
+query = "Quel est le processus pour un entretien de recrutement ?"
 try:
     relevant_chunks = retrieve_relevant_documents(query, faiss_index, chunks)
     response = generate_response(relevant_chunks)
