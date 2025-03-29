@@ -25,12 +25,20 @@ def split_documents(documents):
     for document in documents:
         # Séparer le texte en questions-réponses
         questions_reponses = document.split("\nQ : ")
-        
+
         for qr in questions_reponses:
             qr = qr.strip()
             if qr:  # Éviter les entrées vides
-                chunks.append("Q : " + qr) 
+                # Ajouter "Q : " au début de chaque question
+                if not qr.startswith("Q : "):
+                    qr = "Q : " + qr
+                # Vérifier que chaque morceau contient "R : "
+                if "R : " in qr:
+                    # S'assurer que la question est avant la réponse
+                    question, response = qr.split("R : ", 1)
+                    chunks.append(f"{question}R : {response}")
     return chunks
+
 
 # Store Embeddings (Étape 3)
 def store_embeddings(chunks):
@@ -66,7 +74,7 @@ def retrieve_relevant_documents(query, faiss_index, chunks):
 
     return best_chunk
 
-# Generate Response (Étape 5) - Remplacer OpenAI par BART de Hugging Face
+# Generate Response (Étape 5) 
 def generate_response(relevant_chunks):
     # Charger le modèle BART et le tokenizer
     model_name = "facebook/bart-large-cnn"
@@ -74,25 +82,42 @@ def generate_response(relevant_chunks):
     tokenizer = BartTokenizer.from_pretrained(model_name)
 
     # Combiner les chunks pertinents pour le prompt
-    prompt = " ".join(relevant_chunks)
-    
+    prompt = "".join(relevant_chunks)
+    # Vérifier si les chunks pertinents contiennent des réponses
+    if not relevant_chunks:
+        return "Je ne trouve pas de réponse pertinente."
+
+    # Ajouter un préfixe pour guider le modèle BART
+    prompt = "Voici une question et sa réponse : " + prompt
     # Tokenisation du prompt
     inputs = tokenizer(prompt, return_tensors="pt", truncation=True, padding=True, max_length=1024)
-    
+
     # Générer la réponse avec BART
     summary_ids = model.generate(
-        inputs['input_ids'], 
-        max_length=200, 
-        num_beams=4, 
-        no_repeat_ngram_size=2, 
+        inputs['input_ids'],
+        max_length=200,
+        num_beams=4,
+        no_repeat_ngram_size=2,
         do_sample=True,  # Active l'échantillonnage
-        temperature=0.7   # Influence la créativité
+        temperature=0.5   # Réduire la température pour plus de précision
     )
-    
+
     # Décoder la réponse générée
     response = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
-    
-    return response
+
+    # Filtrer la réponse pour supprimer les parties non pertinentes
+    if "Voici une question et sa réponse : " in response:
+        response = response.replace("Voici une question et sa réponse : ", "")
+
+    # Assurez-vous que la réponse est correctement formatée
+    if "Q : " in response and "R : " in response:
+        # S'assurer que la question est avant la réponse
+        question, response_part = response.split("R : ", 1)
+        return f"{question}R : {response_part}"
+    else:
+        return "Je ne trouve pas de réponse pertinente."
+
+
 
 # Exemple d'utilisation
 pdf_path = "data/FAQ_RH.pdf"
