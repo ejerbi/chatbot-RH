@@ -61,10 +61,10 @@ def retrieve_relevant_documents(query, faiss_index, chunks):
     else:
         best_chunk = "Je ne trouve pas de réponse pertinente."
 
-    print(f"Chunk sélectionné : {best_chunk}")
+    #print(f"Chunk sélectionné : {best_chunk}")
     # print("Chunks récupérés :", relevant_chunks)  # À décommenter pour debug
 
-    return relevant_chunks
+    return best_chunk
 
 # Generate Response (Étape 5) - Remplacer OpenAI par BART de Hugging Face
 def generate_response(relevant_chunks):
@@ -80,7 +80,14 @@ def generate_response(relevant_chunks):
     inputs = tokenizer(prompt, return_tensors="pt", truncation=True, padding=True, max_length=1024)
     
     # Générer la réponse avec BART
-    summary_ids = model.generate(inputs['input_ids'], max_length=200, num_beams=4, no_repeat_ngram_size=2, temperature=0.7)
+    summary_ids = model.generate(
+        inputs['input_ids'], 
+        max_length=200, 
+        num_beams=4, 
+        no_repeat_ngram_size=2, 
+        do_sample=True,  # Active l'échantillonnage
+        temperature=0.7   # Influence la créativité
+    )
     
     # Décoder la réponse générée
     response = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
