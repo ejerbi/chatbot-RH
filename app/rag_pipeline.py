@@ -84,6 +84,8 @@ def generate_response(relevant_chunks, bart_model, bart_tokenizer):
     )
     
     response = bart_tokenizer.decode(summary_ids[0], skip_special_tokens=True)
+    # Nettoyer la réponse
+    response = response.split('.')[0] + '.'
     return response
 
 # ---- 6. Chargement du modèle BART une seule fois ----
