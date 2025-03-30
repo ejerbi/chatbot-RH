@@ -1,139 +1,140 @@
+import streamlit as st
 from PyPDF2 import PdfReader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 import faiss
 import numpy as np
-from sentence_transformers import SentenceTransformer
-from langchain_community.vectorstores import FAISS
-from langchain.chains import RetrievalQA
-from transformers import BartForConditionalGeneration, BartTokenizer
-import atexit
 import torch
+from sentence_transformers import SentenceTransformer
+from transformers import BartForConditionalGeneration, BartTokenizer
+import re
+import os
+
 torch.set_num_threads(1)
 
-# Load Documents (Étape 1)
+# ---- 1. Extraction et nettoyage du texte du PDF ----
 def load_documents(pdf_path):
     reader = PdfReader(pdf_path)
     documents = []
     for page in reader.pages:
         text = page.extract_text()
-        documents.append(text)
+        if text:
+            text = re.sub(r'\s+', ' ', text).strip()  # Supprimer les espaces inutiles
+            documents.append(text)
     return documents
 
-# Split Documents (Étape 2)
+# ---- 2. Séparation des questions-réponses ----
 def split_documents(documents):
     chunks = []
     for document in documents:
-        # Séparer le texte en questions-réponses
-        questions_reponses = document.split("\nQ : ")
-
+        questions_reponses = re.split(r"\bQ\s*:\s*", document)
         for qr in questions_reponses:
             qr = qr.strip()
-            if qr:  # Éviter les entrées vides
-                # Ajouter "Q : " au début de chaque question
-                if not qr.startswith("Q : "):
-                    qr = "Q : " + qr
-                # Vérifier que chaque morceau contient "R : "
-                if "R : " in qr:
-                    # S'assurer que la question est avant la réponse
-                    question, response = qr.split("R : ", 1)
-                    chunks.append(f"{question}R : {response}")
+            if "R :" in qr:
+                qr = "Q : " + qr  
+                chunks.append(qr)
     return chunks
 
-
-# Store Embeddings (Étape 3)
+# ---- 3. Stockage des embeddings avec FAISS ----
 def store_embeddings(chunks):
-    model = SentenceTransformer('all-MiniLM-L6-v2')  # Utilisation de Hugging Face
+    model = SentenceTransformer('all-MiniLM-L6-v2')
     embeddings = model.encode(chunks, convert_to_tensor=True)
 
-    # Conversion des embeddings en format numpy pour FAISS
     embeddings_np = embeddings.cpu().numpy()
-    faiss_index = faiss.IndexFlatL2(embeddings_np.shape[1])  # Index pour la recherche
-    faiss_index.add(embeddings_np)  # Ajout des embeddings dans l'index
+    faiss_index = faiss.IndexFlatL2(embeddings_np.shape[1])
+    faiss_index.add(embeddings_np)
 
-    return faiss_index, embeddings_np
+    return faiss_index, embeddings_np, model
 
-# Retrieve Relevant Documents (Étape 4)
-def retrieve_relevant_documents(query, faiss_index, chunks):
-    model = SentenceTransformer('all-MiniLM-L6-v2')  # Charger le modèle d'embedding
-    query_embedding = model.encode([query])  # Générer l'embedding de la requête
+# ---- 4. Recherche des documents pertinents ----
+def retrieve_relevant_documents(query, faiss_index, chunks, embedding_model):
+    query_embedding = embedding_model.encode([query])
 
-    # Recherche dans FAISS
-    results = faiss_index.search(query_embedding, k=1)  # k=1 pour récupérer le meilleur résultat
+    results = faiss_index.search(query_embedding, k=1)  # Récupérer les 3 meilleurs résultats
+    relevant_chunks = [chunks[i] for i in results[1].flatten()]
 
-    # Récupération des chunks pertinents
-    relevant_chunks = [chunks[i] for i in results[1].flatten()]  
+    return relevant_chunks if relevant_chunks else ["Désolé, je n'ai pas trouvé de réponse pertinente."]
 
-    # Sélection du chunk le plus pertinent
-    if relevant_chunks:
-        best_chunk = relevant_chunks[0]  # Prendre uniquement le premier
-    else:
-        best_chunk = "Je ne trouve pas de réponse pertinente."
+# ---- 5. Génération de la réponse avec BART ----
+def generate_response(relevant_chunks, bart_model, bart_tokenizer):
+    context = []
+    for chunk in relevant_chunks:
+        if "Q :" in chunk:
+            # Supprimer tous les caractères jusqu'au prochain "."
+            chunk = re.sub(r'Q :.*?\?', '', chunk, count=1).strip()
+        if "R :" in chunk:
+            # Garder uniquement les parties pertinentes
+            chunk = chunk.replace("R :", "").strip()
+        context.append(chunk)
 
-    #print(f"Chunk sélectionné : {best_chunk}")
-    # print("Chunks récupérés :", relevant_chunks)  # À décommenter pour debug
+    context = " ".join(context)
+    context = re.sub(r'\s+', ' ', context).strip()
 
-    return best_chunk
+    inputs = bart_tokenizer(context, return_tensors="pt", truncation=True, padding=True, max_length=1024)
 
-# Generate Response (Étape 5) 
-def generate_response(relevant_chunks):
-    # Charger le modèle BART et le tokenizer
-    model_name = "facebook/bart-large-cnn"
-    model = BartForConditionalGeneration.from_pretrained(model_name)
-    tokenizer = BartTokenizer.from_pretrained(model_name)
-
-    # Combiner les chunks pertinents pour le prompt
-    prompt = "".join(relevant_chunks)
-    # Vérifier si les chunks pertinents contiennent des réponses
-    if not relevant_chunks:
-        return "Je ne trouve pas de réponse pertinente."
-
-    # Ajouter un préfixe pour guider le modèle BART
-    prompt = "Voici une question et sa réponse : " + prompt
-    # Tokenisation du prompt
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, padding=True, max_length=1024)
-
-    # Générer la réponse avec BART
-    summary_ids = model.generate(
-        inputs['input_ids'],
-        max_length=200,
-        num_beams=4,
-        no_repeat_ngram_size=2,
-        do_sample=True,  # Active l'échantillonnage
-        temperature=0.5   # Réduire la température pour plus de précision
+    print(hasattr(bart_tokenizer, "lang_code_to_id"))
+    
+    summary_ids = bart_model.generate(
+        inputs['input_ids'], 
+        max_length=150, 
+        num_beams=4, 
+        no_repeat_ngram_size=2, 
+        do_sample=True, 
+        temperature=0.2,
+        forced_bos_token_id=bart_tokenizer.convert_tokens_to_ids("<s>")
+            # Forcer la génération en français
     )
+    
+    response = bart_tokenizer.decode(summary_ids[0], skip_special_tokens=True)
+    return response
 
-    # Décoder la réponse générée
-    response = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
+# ---- 6. Chargement du modèle BART une seule fois ----
+model_name = "facebook/bart-large-cnn"
+bart_model = BartForConditionalGeneration.from_pretrained(model_name)
+bart_tokenizer = BartTokenizer.from_pretrained(model_name)
 
-    # Filtrer la réponse pour supprimer les parties non pertinentes
-    if "Voici une question et sa réponse : " in response:
-        response = response.replace("Voici une question et sa réponse : ", "")
+# ---- 7. Interface Streamlit ----
+st.title("Chatbot FAQ - RH")
 
-    # Assurez-vous que la réponse est correctement formatée
-    if "Q : " in response and "R : " in response:
-        # S'assurer que la question est avant la réponse
-        question, response_part = response.split("R : ", 1)
-        return f"{question}R : {response_part}"
+# ---- Champ pour entrer le chemin du fichier PDF ----
+pdf_path = "data/FAQ_RH.pdf"  # Chemin par défaut
+if pdf_path:
+    if os.path.exists(pdf_path):
+        st.spinner("Lecture du fichier...")
+        documents = load_documents(pdf_path)
+        chunks = split_documents(documents)
+        faiss_index, embeddings, embedding_model = store_embeddings(chunks)
+        st.session_state["faiss_index"] = faiss_index
+        st.session_state["chunks"] = chunks
+        st.session_state["embedding_model"] = embedding_model
+        st.success("Fichier chargé avec succès ! Posez votre question.")
     else:
-        return "Je ne trouve pas de réponse pertinente."
+        st.error("Chemin invalide ! Veuillez vérifier l'emplacement du fichier.")
 
+# ---- Gestion de l'historique des messages ----
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
+# ---- Affichage de l'historique ----
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
-# Exemple d'utilisation
-pdf_path = "data/FAQ_RH.pdf"
-documents = load_documents(pdf_path)
-chunks = split_documents(documents)
-faiss_index, embeddings = store_embeddings(chunks)
+# ---- Zone de saisie utilisateur ----
+query = st.chat_input("Posez une question ici...")
 
-# Ensure proper cleanup of FAISS resources
+if query and "faiss_index" in st.session_state:
+    with st.chat_message("user"):
+        st.markdown(query)
+    st.session_state.messages.append({"role": "user", "content": query})
 
-atexit.register(faiss_index.reset)
+    # ---- Récupération et génération de la réponse ----
+    with st.spinner("Recherche de la réponse..."):
+        relevant_chunks = retrieve_relevant_documents(query, 
+                                                      st.session_state["faiss_index"], 
+                                                      st.session_state["chunks"], 
+                                                      st.session_state["embedding_model"])
+        response = generate_response(relevant_chunks, bart_model, bart_tokenizer)
 
-query = "Quel est le processus pour un entretien de recrutement ?"
-try:
-    relevant_chunks = retrieve_relevant_documents(query, faiss_index, chunks)
-    response = generate_response(relevant_chunks)
-    print(response)
-finally:
-    # Explicitly clean up FAISS resources
-    del faiss_index
+    # ---- Affichage de la réponse ----
+    with st.chat_message("assistant"):
+        st.markdown(response)
+    st.session_state.messages.append({"role": "assistant", "content": response})
